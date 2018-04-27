@@ -1180,42 +1180,71 @@ func (m *ExpirationManager) deleteEntry(leaseID string) error {
 	return nil
 }
 
-// createIndexByToken creates a secondary index from the token to a lease entry
-func (m *ExpirationManager) createIndexByToken(token, leaseID string) error {
-	saltedID, err := m.tokenStore.SaltID(m.quitContext, token)
+func (m *ExpirationManager) hmacIndexPath(tokenID, leaseID string) (string, error) {
+	tokenIDHMAC, err := m.tokenStore.hmac(m.quitContext, tokenID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
+	leaseIDHMAC, err := m.tokenStore.hmac(m.quitContext, leaseID)
+	if err != nil {
+		return "", err
+	}
+
+	return path.Join(tokenIDHMAC, leaseIDHMAC), nil
+}
+
+func (m *ExpirationManager) hashedIndexPath(tokenID, leaseID string) (string, error) {
+	saltedID, err := m.tokenStore.SaltID(m.quitContext, tokenID)
+	if err != nil {
+		return "", err
+	}
 	leaseSaltedID, err := m.tokenStore.SaltID(m.quitContext, leaseID)
 	if err != nil {
+		return "", err
+	}
+
+	return path.Join(saltedID, leaseSaltedID), nil
+}
+
+// createIndexByToken creates a secondary index from the token to a lease entry
+func (m *ExpirationManager) createIndexByToken(tokenID, leaseID string) error {
+	indexPath, err := m.hmacIndexPath(tokenID, leaseID)
+	if err != nil {
 		return err
 	}
 
-	ent := logical.StorageEntry{
-		Key:   saltedID + "/" + leaseSaltedID,
+	entry := logical.StorageEntry{
+		Key:   indexPath,
 		Value: []byte(leaseID),
 	}
-	if err := m.tokenView.Put(m.quitContext, &ent); err != nil {
+
+	err = m.tokenView.Put(m.quitContext, &entry)
+	if err != nil {
 		return errwrap.Wrapf("failed to persist lease index entry: {{err}}", err)
 	}
+
 	return nil
 }
 
 // indexByToken looks up the secondary index from the token to a lease entry
-func (m *ExpirationManager) indexByToken(token, leaseID string) (*logical.StorageEntry, error) {
-	saltedID, err := m.tokenStore.SaltID(m.quitContext, token)
+func (m *ExpirationManager) indexByToken(tokenID, leaseID string) (*logical.StorageEntry, error) {
+	indexPath, err := m.hmacIndexPath(tokenID, leaseID)
 	if err != nil {
 		return nil, err
 	}
 
-	leaseSaltedID, err := m.tokenStore.SaltID(m.quitContext, leaseID)
+	entry, err := m.tokenView.Get(m.quitContext, indexPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to look up secondary index entry")
+	}
+	if entry != nil {
+		return entry, nil
 	}
 
-	key := saltedID + "/" + leaseSaltedID
-	entry, err := m.tokenView.Get(m.quitContext, key)
+	// This is only here for backwards compatibility
+	indexPath, err = m.hashedIndexPath(tokenID, leaseID)
+	entry, err = m.tokenView.Get(m.quitContext, indexPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up secondary index entry")
 	}
@@ -1223,33 +1252,57 @@ func (m *ExpirationManager) indexByToken(token, leaseID string) (*logical.Storag
 }
 
 // removeIndexByToken removes the secondary index from the token to a lease entry
-func (m *ExpirationManager) removeIndexByToken(token, leaseID string) error {
-	saltedID, err := m.tokenStore.SaltID(m.quitContext, token)
+func (m *ExpirationManager) removeIndexByToken(tokenID, leaseID string) error {
+	indexPath, err := m.hmacIndexPath(tokenID, leaseID)
 	if err != nil {
 		return err
 	}
-
-	leaseSaltedID, err := m.tokenStore.SaltID(m.quitContext, leaseID)
+	err = m.tokenView.Delete(m.quitContext, indexPath)
 	if err != nil {
-		return err
-	}
-
-	key := saltedID + "/" + leaseSaltedID
-	if err := m.tokenView.Delete(m.quitContext, key); err != nil {
 		return errwrap.Wrapf("failed to delete lease index entry: {{err}}", err)
 	}
+
+	// This is only here for backwards compatibility
+	indexPath, err = m.hashedIndexPath(tokenID, leaseID)
+	err = m.tokenView.Delete(m.quitContext, indexPath)
+	if err != nil {
+		return errwrap.Wrapf("failed to delete lease index entry: {{err}}", err)
+	}
+
 	return nil
 }
 
 // lookupByToken is used to lookup all the leaseID's via the
-func (m *ExpirationManager) lookupByToken(token string) ([]string, error) {
-	saltedID, err := m.tokenStore.SaltID(m.quitContext, token)
+func (m *ExpirationManager) lookupByToken(tokenID string) ([]string, error) {
+	var leaseIDs []string
+
+	idHMAC, err := m.tokenStore.hmac(m.quitContext, tokenID)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := m.scanLeaseIDsByPrefix(idHMAC + "/")
 	if err != nil {
 		return nil, err
 	}
 
+	leaseIDs = append(leaseIDs, ids...)
+
+	// This is only here for backwards compatibility
+	saltedID, err := m.tokenStore.SaltID(m.quitContext, tokenID)
+	if err != nil {
+		return nil, err
+	}
+	ids, err = m.scanLeaseIDsByPrefix(saltedID + "/")
+	if err != nil {
+		return nil, err
+	}
+
+	return append(leaseIDs, ids...), nil
+}
+
+// lookupByToken is used to lookup all the leaseID's via the
+func (m *ExpirationManager) scanLeaseIDsByPrefix(prefix string) ([]string, error) {
 	// Scan via the index for sub-leases
-	prefix := saltedID + "/"
 	subKeys, err := m.tokenView.List(m.quitContext, prefix)
 	if err != nil {
 		return nil, errwrap.Wrapf("failed to list leases: {{err}}", err)
