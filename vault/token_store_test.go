@@ -3513,9 +3513,9 @@ func TestTokenStore_HandleTidyCase1(t *testing.T) {
 		}
 
 		// Destroy the cubby space
-		err = ts.destroyCubbyhole(context.Background(), saltedTut)
+		err = ts.cubbyholeDestroyer(context.Background(), saltedTut)
 		if err != nil {
-			t.Fatalf("failed to destroyCubbyhole: %v", err)
+			t.Fatalf("failed to destroy cubbyhole: %v", err)
 		}
 
 		// Leaking of accessor should have resulted in no change to the number

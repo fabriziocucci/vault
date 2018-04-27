@@ -226,16 +226,10 @@ func (m *ExpirationManager) Tidy() error {
 
 		isValid, ok = tokenCache[le.ClientToken]
 		if !ok {
-			saltedID, err := m.tokenStore.SaltID(m.quitContext, le.ClientToken)
-			if err != nil {
-				tidyErrors = multierror.Append(tidyErrors, errwrap.Wrapf("failed to lookup salt id: {{err}}", err))
-				return
-			}
 			lock := locksutil.LockForKey(m.tokenStore.tokenLocks, le.ClientToken)
 			lock.RLock()
-			te, err := m.tokenStore.lookupSalted(m.quitContext, saltedID, true)
+			te, err := m.tokenStore.lookupTokenNonLocked(m.quitContext, le.ClientToken, true)
 			lock.RUnlock()
-
 			if err != nil {
 				tidyErrors = multierror.Append(tidyErrors, errwrap.Wrapf("failed to lookup token: {{err}}", err))
 				return
@@ -706,7 +700,7 @@ func (m *ExpirationManager) Renew(leaseID string, increment time.Duration) (*log
 // RestoreSaltedTokenCheck verifies that the token is not expired while running
 // in restore mode.  If we are not in restore mode, the lease has already been
 // restored or the lease still has time left, it returns true.
-func (m *ExpirationManager) RestoreSaltedTokenCheck(source string, saltedID string) (bool, error) {
+func (m *ExpirationManager) RestoreSaltedTokenCheck(source string, obfuscatedID string) (bool, error) {
 	defer metrics.MeasureSince([]string{"expire", "restore-token-check"}, time.Now())
 
 	// Return immediately if we are not in restore mode, expiration manager is
@@ -723,7 +717,7 @@ func (m *ExpirationManager) RestoreSaltedTokenCheck(source string, saltedID stri
 		return true, nil
 	}
 
-	leaseID := path.Join(source, saltedID)
+	leaseID := path.Join(source, obfuscatedID)
 
 	m.lockLease(leaseID)
 	defer m.unlockLease(leaseID)
@@ -749,11 +743,11 @@ func (m *ExpirationManager) RenewToken(req *logical.Request, source string, toke
 	defer metrics.MeasureSince([]string{"expire", "renew-token"}, time.Now())
 
 	// Compute the Lease ID
-	saltedID, err := m.tokenStore.SaltID(m.quitContext, token)
+	idHMAC, err := m.tokenStore.hmac(m.quitContext, token)
 	if err != nil {
 		return nil, err
 	}
-	leaseID := path.Join(source, saltedID)
+	leaseID := path.Join(source, idHMAC)
 
 	// Load the entry
 	le, err := m.loadEntry(leaseID)
